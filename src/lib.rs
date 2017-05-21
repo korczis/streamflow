@@ -7,6 +7,7 @@ extern crate time;
 
 pub mod data;
 pub mod options;
+pub mod types;
 
 #[cfg(test)]
 mod tests {
