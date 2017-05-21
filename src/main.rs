@@ -147,7 +147,7 @@ fn main() {
     // - http://whatever.net/data.csv
 
     // TODO: Wrap in method - crate_worker_threads()
-    let _ = files.iter().map(move |file| {
+    let workers = files.iter().map(move |file| {
         let tx = tx.clone();
 
         // TODO: Use only one IO thread
@@ -186,7 +186,9 @@ fn main() {
         }
     }
 
-    //    let _ = workers.map(|worker| {
-    //        worker.join();
-    //    });
+    let res = workers.map(|worker| {
+        worker.join();
+    });
+
+    println!("Done - {:?}", res);
 }
