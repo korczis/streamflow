@@ -1,11 +1,11 @@
-[target.x86_64-apple-darwin]
-rustflags = [
-  "-C",
-  "target-feature=+ssse3",
-  "-C",
-  "target-feature=+sse4.2",
-  "-C",
-  "target-cpu=native",
-  "-C",
-  "inline-threshold=1000"
-]
+#[target.x86_64-apple-darwin]
+#rustflags = [
+#  "-C",
+#  "target-feature=+ssse3",
+#  "-C",
+#  "target-feature=+sse4.2",
+#  "-C",
+#  "target-cpu=native",
+#  "-C",
+#  "inline-threshold=1000"
+#]
