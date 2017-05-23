@@ -1,22 +1,27 @@
 #[macro_use]
 extern crate log;
+extern crate futures;
 extern crate env_logger;
 
 extern crate clap;
 extern crate csv;
 extern crate streamflow;
 extern crate time;
+extern crate tokio_core;
 
 use clap::{App, Arg};
 // use streamflow::*;
 use std::env;
-use std::sync::mpsc;
+
+use futures::{Stream, Sink, Future};
+use futures::sync::mpsc;
+// use std::sync::mpsc;
 use std::thread;
 // use std::fs;
 // use std::os::unix::fs::MetadataExt;
 // use time::PreciseTime;
+use tokio_core::reactor::Core;
 
-use streamflow::data::source;
 use streamflow::options::Options;
 
 const AUTHOR: &'static str = env!("CARGO_PKG_AUTHORS");
@@ -94,10 +99,9 @@ fn main() {
 
     env_logger::init().unwrap();
 
-    let _ = source::file::Csv::new();
+    //    let (tx, rx) = mpsc::channel();
 
-    let (tx, rx) = mpsc::channel();
-
+    #[derive(Debug)]
     enum MessageType {
         Header,
         Row,
@@ -109,38 +113,81 @@ fn main() {
         _ => vec![String::from(".")],
     };
 
-    // TODO: Use generic URI (Connection String)
-    // - file://.tmp/incidents.csv?has-header=true?delimiter="|"
-    // - http://whatever.net/data.csv
+    // README: This is based on http://hermanradtke.com/2017/03/03/future-mpsc-queue-with-tokio.html
 
-    // TODO: Wrap in method - crate_worker_threads()
+    // tokio Core is an event loop executor. An executor is what runs a future to
+    // completion.
+    let mut core = Core::new().expect("Failed to create core");
+
+    // `core.remote()` is a thread safe version of `core.handle()`. Both `core.remote()`
+    // and `core.handle()` are used to spawn a future. When a future is _spawned_,
+    // it basically means that it is being executed.
+    let remote = core.remote();
+
+    // Now we create a multi-producer, single-consumer channel. This channel is very
+    // similar to the mpsc channel in the std library. One big difference with this
+    // channel is that `tx` and `rx` return futures. In order to have `tx` or `rx`
+    // actually do any work, they have to be _executed_ by Core.
+    //
+    // The parameter passed to `mpsc::channel()` determines how large the queue is
+    // _per tx_. Since we are cloning `tx` per iteration of the loop, we are guranteed
+    // 1 spot for each loop iteration. Cloning tx is how we get multiple producers.
+    //
+    // For more detail on mpsc, see https://tokio.rs/docs/going-deeper/synchronization/
+    //
+    // Quick note:
+    //    - `tx` is of type `Sink`. A sink is something that you can place a value into
+    //    and then _flush_ the value into the queue.
+    //    - `rx` is of type `Stream`. A stream is an iterator of _future_ values.
+    // More details on `tx` and `rx` below. For even more detail, see
+    // https://tokio.rs/docs/getting-started/streams-and-sinks/
+    let (tx, rx) = mpsc::channel(10);
+
+    let mut stats = SourceStats::default();
+
+    // Create a thread that performs some work.
     let thread_handle = thread::spawn(move || {
         for file in files {
-            debug!("Processing file {:?}", file);
+            let tx = tx.clone();
+
             if let Ok(rdr) = csv::Reader::from_file(file) {
                 let mut rdr = rdr.delimiter(opts.csv.delimiter)
                     .has_headers(opts.csv.has_header)
                     .flexible(opts.csv.flexible);
 
-                if opts.csv.has_header {
-                    let _ = tx.send((MessageType::Header, Some(rdr.headers().unwrap())));
-                }
-
                 for record in rdr.records() {
-                    if let Ok(record) = record {
-                        let _ = tx.send((MessageType::Row, Some(record)));
-                    }
-                }
+                    let tx = tx.clone();
 
-                let _ = tx.send((MessageType::EndOfStream, None));
+                    // `remote.spawn` accepts a closure with a single parameter of type `&Handle`.
+                    // In this example, the `&Handle` is not needed. The future returned from the
+                    // closure will be executed.
+                    //
+                    // Note: We must use `remote.spawn()` instead of `handle.spawn()` because the
+                    // Core was created on a different thread.
+                    remote.spawn(|_| {
+                        tx.send((MessageType::Row, Some(record.unwrap())))
+                            .then(|tx| {
+                                match tx {
+                                    Ok(_tx) => {
+                                        // info!("Sink flushed");
+                                        Ok(())
+                                    }
+                                    Err(e) => {
+                                        error!("Sink failed! {:?}", e);
+                                        Err(())
+                                    }
+                                }
+                            })
+                    })
+                }
             }
         }
     });
 
-    let mut stats = SourceStats::default();
-
-    // TODO: Wrap in method - crate_processing_thread()
-    while let Ok(data) = rx.recv() {
+    // As mentioned above, rx is a stream. That means we are expecting multiple _future_
+    // values. Here we use `for_each` to yield each value as it comes through the channel.
+    let f2 = rx.for_each(|data| {
+        // The stream will stop on `Err`, so we need to return `Ok`.
         let (mt, data) = data;
 
         match mt {
@@ -151,11 +198,19 @@ fn main() {
                 stats.process_row(&data);
             }
             MessageType::EndOfStream => {
+                debug!("{:?}", &stats);
                 stats.process_end_of_stream();
-                break;
             }
         };
-    }
+
+        Ok(())
+    });
+
+    // The executor is started by the call to `core.run()` and will finish once the `f2`
+    // future is finished. Keep in mind that since `rx` is a stream, it will not finish
+    // until there is an error. Using a stream with `core.run()` is a common pattern and
+    // is how servers are normally implemented.
+    core.run(f2).expect("Core failed to run");
 
     let _ = thread_handle.join();
     debug!("Done");
