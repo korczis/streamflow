@@ -37,19 +37,14 @@ name = "streamflow"
 path = "src/lib.rs"
 
 [[bin]]
-name = "prototype"
-doc = false
-path = "src/prototype.rs"
-
-[[bin]]
 name = "streamflow"
 doc = false
 path = "src/main.rs"
 
 [[bin]]
-name = "stream"
+name = "streamflow-old"
 doc = false
-path = "src/stream.rs"
+path = "src/main-old.rs"
 
 # Debug settings
 [profile.dev]

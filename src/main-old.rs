@@ -10,16 +10,12 @@ extern crate time;
 extern crate tokio_core;
 
 use clap::{App, Arg};
-// use streamflow::*;
 use std::env;
 
 use futures::{Stream, Sink, Future};
 use futures::sync::mpsc;
-// use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread;
-// use std::fs;
-// use std::os::unix::fs::MetadataExt;
-use time::PreciseTime;
 use tokio_core::reactor::Core;
 
 use streamflow::options::Options;
@@ -86,6 +82,8 @@ fn main() {
             .required(true))
         .get_matches();
 
+    debug!("{:?}", &matches);
+
     let opts = Options::from(&matches);
 
     // TODO: Use debug/release(null) implementation of logger
@@ -98,38 +96,87 @@ fn main() {
 
     env_logger::init().unwrap();
 
-    let file = String::from("tmp/test.csv"); // matches.value_of("FILE").unwrap();
+    //    let (tx, rx) = mpsc::channel();
 
-    let start = PreciseTime::now();
+    #[derive(Debug)]
+    enum MessageType {
+        Header,
+        Row,
+        EndOfStream
+    };
+    // README: This is based on http://hermanradtke.com/2017/03/03/future-mpsc-queue-with-tokio.html
 
-    // TODO: Hard work here!
-
-    // tokio Core is an event loop executor. An executor is what runs a future to
-    // completion.
     let mut core = Core::new().expect("Failed to create core");
 
-    // `core.remote()` is a thread safe version of `core.handle()`. Both `core.remote()`
-    // and `core.handle()` are used to spawn a future. When a future is _spawned_,
-    // it basically means that it is being executed.
     let remote = core.remote();
 
-    // let (tx, rx) = mpsc::channel(1024);
+    let (tx, rx) = mpsc::channel(10);
+
+    let mut stats = SourceStats::default();
+
+    let file = String::from("tmp/test.csv"); // matches.value_of("FILE").unwrap();
 
     // Create a thread that performs some work.
     let thread_handle = thread::spawn(move || {
-        let file = file.clone();
-        let opts = opts.clone();
+        let tx = tx.clone();
 
-        if let Ok(rdr) = csv::Reader::from_file(&file) {
+        remote.spawn(move |_| {
+            let rdr = csv::Reader::from_file(file).unwrap();
+
             let mut rdr = rdr.delimiter(opts.csv.delimiter)
                 .has_headers(opts.csv.has_header)
                 .flexible(opts.csv.flexible);
-        }
+
+            let mut records = rdr.records();
+
+            let f = ::futures::done::<(), ()>(Ok(()));
+            f.then(move |_res| {
+                tx.send((MessageType::Row, Some(records.next().unwrap().unwrap())))
+                    .then(move |tx| {
+                        tx.unwrap().send((MessageType::Row, Some(records.next().unwrap().unwrap())))
+                            .then(move |tx| {
+                                match tx {
+                                    Ok(_tx) => {
+                                        info!("Sink flushed");
+                                        Ok(())
+                                    }
+                                    Err(e) => {
+                                        error!("Sink failed! {:?}", e);
+                                        Err(())
+                                    }
+                                }
+                            })
+                    })
+            })
+        })
     });
 
-    let diff = start.to(PreciseTime::now());
-    let elapsed_secs = diff.num_nanoseconds().unwrap() as f64 * 1e-9;
+    // As mentioned above, rx is a stream. That means we are expecting multiple _future_
+    // values. Here we use `for_each` to yield each value as it comes through the channel.
+    let f2 = rx.for_each(|data| {
+        // The stream will stop on `Err`, so we need to return `Ok`.
+        let (mt, data) = data;
+
+        match mt {
+            MessageType::Header => {
+                debug!("{:?}", &data);
+                stats.process_header(&data);
+            }
+            MessageType::Row => {
+                debug!("{:?}", &data);
+                stats.process_row(&data);
+            }
+            MessageType::EndOfStream => {
+                debug!("{:?}", &stats);
+                stats.process_end_of_stream();
+            }
+        };
+
+        Ok(())
+    });
+
+    core.run(f2).expect("Core failed to run");
 
     let _ = thread_handle.join();
-    debug!("Elapsed time {:.2}", elapsed_secs);
+    debug!("Done");
 }
